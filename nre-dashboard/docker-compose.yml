@@ -1,0 +1,87 @@
+version: "3.9"
+
+# ============================================================
+# NRE Network Device Dashboard — full stack
+# ============================================================
+#
+# Services:
+#   redis     — channel layer for Django Channels WebSocket fan-out
+#   fastapi   — device-status microservice (REST + SSE + webhook sender)
+#   django    — API gateway (REST proxy + SSE + webhook receiver + WS)
+#   frontend  — React SPA served by nginx (proxies API/WS to Django)
+#
+# Start everything:
+#   docker compose up --build
+#
+# Dashboard: http://localhost:3000
+# Django API: http://localhost:8000/devices
+# FastAPI:    http://localhost:5001/devices
+# FastAPI docs: http://localhost:5001/docs
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Redis — channel layer backend for WebSocket broadcast
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ----------------------------------------------------------
+  # FastAPI microservice — device polling + SSE + webhook
+  # ----------------------------------------------------------
+  fastapi:
+    build:
+      context: ./fastapi_service
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      # Tell FastAPI where Django's webhook receiver lives
+      - DJANGO_WEBHOOK_URL=http://django:8000/webhook/devices
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/devices')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------
+  # Django gateway — REST proxy + SSE stream + WebSocket
+  # ----------------------------------------------------------
+  django:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # FastAPI service URL (uses Docker service name)
+      - FLASK_SERVICE_URL=http://fastapi:5001
+      # Redis channel layer for multi-process WebSocket support
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      fastapi:
+        condition: service_healthy
+
+  # ----------------------------------------------------------
+  # React frontend — nginx serves SPA + proxies to Django
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - django
